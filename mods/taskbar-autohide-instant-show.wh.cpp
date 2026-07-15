@@ -2,7 +2,7 @@
 // @id              taskbar-autohide-instant-show
 // @name            Taskbar Auto-Hide Instant Show
 // @description     Removes the delay before the taskbar appears with custom animation types (none, slide, elastic, bounce, fade, slide+fade, overshoot)
-// @version         2.4
+// @version         2.5
 // @author          Bo0ii
 // @github          https://github.com/Bo0ii
 // @homepage        https://github.com/Bo0ii/windhawk-mods
@@ -280,11 +280,17 @@ static int Lerp(int a, int b, double t) {
     return a + (int)((b - a) * t);
 }
 
-// Resolves the actual monitor the taskbar window currently belongs to. Must
-// be queried fresh on every call (never cached) since display topology can
-// change between hide/show cycles (sleep/wake, monitor unplug/replug, etc).
-bool GetOwnMonitorRect(HWND hWnd, RECT* out) {
-    HMONITOR hMon = MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST);
+// Resolves the taskbar's owning monitor from its SHOWN-state rect, which
+// always lies fully on that monitor. Resolving from the window itself
+// (MonitorFromWindow) mis-attributes a hidden taskbar to the ADJACENT
+// monitor in stacked layouts -- the hidden rect overhangs mostly past its
+// own monitor's edge, so the animation path gets bounded inside the wrong
+// monitor and crosses a DPI boundary (observed as a tiny, resizing bar
+// bouncing around the neighbor screen during the show animation). Queried
+// fresh on every call (never cached) since display topology can change
+// between hide/show cycles (sleep/wake, monitor unplug/replug, etc).
+bool GetMonitorRectForRect(const RECT& anchorRect, RECT* out) {
+    HMONITOR hMon = MonitorFromRect(&anchorRect, MONITOR_DEFAULTTONEAREST);
     if (!hMon) {
         return false;
     }
@@ -374,8 +380,9 @@ void DoCustomAnimation(HWND hWnd,
     // no display exists past the docked edge the path is left as-is.
     RECT pathStartRect = *startRect;
     RECT pathEndRect = *endRect;
+    const RECT& shownStateRect = show ? *endRect : *startRect;
     RECT monitorRect;
-    if (GetOwnMonitorRect(hWnd, &monitorRect) &&
+    if (GetMonitorRectForRect(shownStateRect, &monitorRect) &&
         (RectOverhangsAdjacentMonitor(*startRect, monitorRect) ||
          RectOverhangsAdjacentMonitor(*endRect, monitorRect))) {
         pathStartRect = ShiftRectFullyInsideMonitor(*startRect, monitorRect);
