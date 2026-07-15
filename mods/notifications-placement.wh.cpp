@@ -2,7 +2,7 @@
 // @id              notifications-placement
 // @name            Customize Windows notifications placement
 // @description     Move notifications to another monitor or another corner of the screen
-// @version         1.2.2
+// @version         1.2.3
 // @author          m417z
 // @github          https://github.com/m417z
 // @twitter         https://twitter.com/m417z
@@ -812,6 +812,42 @@ BOOL WINAPI SetWindowPos_Hook(HWND hWnd,
 
     BOOL ret =
         SetWindowPos_Original(hWnd, hWndInsertAfter, X, Y, cx, cy, uFlags);
+
+    if (!g_unloading && ret) {
+        RECT rcActual{};
+        if (GetWindowRect(hWnd, &rcActual)) {
+            int actualCx = rcActual.right - rcActual.left;
+            int actualCy = rcActual.bottom - rcActual.top;
+
+            // The size above is a DPI-ratio estimate of what the toast will
+            // render at on the destination monitor. With more than two
+            // monitors at very different DPI, the actual content can settle
+            // on a different size than the estimate, leaving the centering/
+            // edge-alignment math computed against a size the window doesn't
+            // have, which crops the visible banner. Re-derive the position
+            // from the real post-move size instead of the estimate.
+            if (actualCx != cx || actualCy != cy) {
+                Wh_Log(L"Size mismatch after move: requested %dx%d, actual %dx%d",
+                       cx, cy, actualCx, actualCy);
+
+                int correctedX = rcActual.left;
+                int correctedY = rcActual.top;
+                int correctedCx = actualCx;
+                int correctedCy = actualCy;
+                AdjustCoreWindowPos(&correctedX, &correctedY, &correctedCx,
+                                    &correctedCy);
+
+                // Only re-apply if the correction pass agrees the actual size
+                // is stable (i.e. it resolved to the same monitor rather than
+                // wanting to rescale again), so this can't loop or oscillate.
+                if (correctedCx == actualCx && correctedCy == actualCy) {
+                    SetWindowPos_Original(hWnd, hWndInsertAfter, correctedX,
+                                          correctedY, correctedCx, correctedCy,
+                                          uFlags);
+                }
+            }
+        }
+    }
 
     if (g_target == Target::ShellExperienceHost &&
         GetWindowThreadProcessId(hWnd, nullptr) == GetCurrentThreadId()) {
