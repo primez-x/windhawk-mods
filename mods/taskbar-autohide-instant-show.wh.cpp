@@ -2,7 +2,7 @@
 // @id              taskbar-autohide-instant-show
 // @name            Taskbar Auto-Hide Instant Show
 // @description     Removes the delay before the taskbar appears with custom animation types (none, slide, elastic, bounce, fade, slide+fade, overshoot)
-// @version         2.2
+// @version         2.4
 // @author          Bo0ii
 // @github          https://github.com/Bo0ii
 // @homepage        https://github.com/Bo0ii/windhawk-mods
@@ -280,6 +280,84 @@ static int Lerp(int a, int b, double t) {
     return a + (int)((b - a) * t);
 }
 
+// Resolves the actual monitor the taskbar window currently belongs to. Must
+// be queried fresh on every call (never cached) since display topology can
+// change between hide/show cycles (sleep/wake, monitor unplug/replug, etc).
+bool GetOwnMonitorRect(HWND hWnd, RECT* out) {
+    HMONITOR hMon = MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST);
+    if (!hMon) {
+        return false;
+    }
+
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfo(hMon, &mi)) {
+        return false;
+    }
+
+    *out = mi.rcMonitor;
+    return true;
+}
+
+// Shifts a rect (preserving its size) so it lies fully inside the given
+// monitor rect. Used to bound the *visible animation path* only — the final
+// resting position Explorer requested is applied separately, unclamped, so
+// hidden-state geometry (edge-reveal sliver, hit testing) stays intact.
+RECT ShiftRectFullyInsideMonitor(const RECT& rect, const RECT& monitorRect) {
+    RECT r = rect;
+    int w = r.right - r.left;
+    int h = r.bottom - r.top;
+    if (r.right > monitorRect.right) {
+        r.right = monitorRect.right;
+        r.left = r.right - w;
+    }
+    if (r.left < monitorRect.left) {
+        r.left = monitorRect.left;
+        r.right = r.left + w;
+    }
+    if (r.bottom > monitorRect.bottom) {
+        r.bottom = monitorRect.bottom;
+        r.top = r.bottom - h;
+    }
+    if (r.top < monitorRect.top) {
+        r.top = monitorRect.top;
+        r.bottom = r.top + h;
+    }
+    return r;
+}
+
+// Returns true if the part of `rect` overhanging outside `monitorRect`
+// lands on another physical display (e.g. a stacked primary-above-laptop
+// arrangement). Only then does the animation path need bounding — on a
+// normal edge the overhang is empty void, nothing renders there, and the
+// slide can run its full travel unmodified.
+bool RectOverhangsAdjacentMonitor(const RECT& rect, const RECT& monitorRect) {
+    RECT overhangs[4];
+    int count = 0;
+    if (rect.bottom > monitorRect.bottom) {
+        overhangs[count++] =
+            RECT{rect.left, monitorRect.bottom, rect.right, rect.bottom};
+    }
+    if (rect.top < monitorRect.top) {
+        overhangs[count++] =
+            RECT{rect.left, rect.top, rect.right, monitorRect.top};
+    }
+    if (rect.right > monitorRect.right) {
+        overhangs[count++] =
+            RECT{monitorRect.right, rect.top, rect.right, rect.bottom};
+    }
+    if (rect.left < monitorRect.left) {
+        overhangs[count++] =
+            RECT{rect.left, rect.top, monitorRect.left, rect.bottom};
+    }
+    for (int i = 0; i < count; i++) {
+        if (MonitorFromRect(&overhangs[i], MONITOR_DEFAULTTONULL)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void DoCustomAnimation(HWND hWnd,
                        const RECT* startRect,
                        const RECT* endRect,
@@ -287,6 +365,23 @@ void DoCustomAnimation(HWND hWnd,
                        int myAnimGen) {
     int animType = g_settings.animationType;
     int duration = show ? g_settings.showDuration : g_settings.hideDuration;
+
+    // Bound the *visible animation path* to this taskbar's own monitor when
+    // the hidden-state overhang would land on an adjacent display (stacked
+    // monitor arrangements). The frame loop below interpolates over these
+    // path rects only; the final SetWindowPos calls still use Explorer's
+    // exact rects, so the resting hidden/shown geometry is untouched. When
+    // no display exists past the docked edge the path is left as-is.
+    RECT pathStartRect = *startRect;
+    RECT pathEndRect = *endRect;
+    RECT monitorRect;
+    if (GetOwnMonitorRect(hWnd, &monitorRect) &&
+        (RectOverhangsAdjacentMonitor(*startRect, monitorRect) ||
+         RectOverhangsAdjacentMonitor(*endRect, monitorRect))) {
+        pathStartRect = ShiftRectFullyInsideMonitor(*startRect, monitorRect);
+        pathEndRect = ShiftRectFullyInsideMonitor(*endRect, monitorRect);
+        Wh_Log(L"> bounded animation path to own monitor (show=%d)", show);
+    }
 
     if (duration <= 0) {
         SetWindowPos(hWnd, NULL, endRect->left, endRect->top,
@@ -375,12 +470,12 @@ void DoCustomAnimation(HWND hWnd,
         }
 
         if (usePosition) {
-            int x = Lerp(startRect->left, endRect->left, posT);
-            int y = Lerp(startRect->top, endRect->top, posT);
-            int w = Lerp(startRect->right - startRect->left,
-                         endRect->right - endRect->left, posT);
-            int h = Lerp(startRect->bottom - startRect->top,
-                         endRect->bottom - endRect->top, posT);
+            int x = Lerp(pathStartRect.left, pathEndRect.left, posT);
+            int y = Lerp(pathStartRect.top, pathEndRect.top, posT);
+            int w = Lerp(pathStartRect.right - pathStartRect.left,
+                         pathEndRect.right - pathEndRect.left, posT);
+            int h = Lerp(pathStartRect.bottom - pathStartRect.top,
+                         pathEndRect.bottom - pathEndRect.top, posT);
             SetWindowPos(hWnd, NULL, x, y, w, h,
                          SWP_NOZORDER | SWP_NOACTIVATE);
         }
