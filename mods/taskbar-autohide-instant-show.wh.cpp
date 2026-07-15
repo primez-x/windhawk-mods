@@ -2,7 +2,7 @@
 // @id              taskbar-autohide-instant-show
 // @name            Taskbar Auto-Hide Instant Show
 // @description     Removes the delay before the taskbar appears with custom animation types (none, slide, elastic, bounce, fade, slide+fade, overshoot)
-// @version         2.5
+// @version         2.6
 // @author          Bo0ii
 // @github          https://github.com/Bo0ii
 // @homepage        https://github.com/Bo0ii/windhawk-mods
@@ -592,10 +592,23 @@ void WINAPI TrayUI_SlideWindow_Hook(void* pThis,
             TrayUI_SlideWindow_Original(pThis, hWnd, rect, monitor, show,
                                         false);
 
-            // Move back to hidden start position
-            SetWindowPos(hWnd, NULL, startRect.left, startRect.top,
-                         startRect.right - startRect.left,
-                         startRect.bottom - startRect.top,
+            // Move back to the animation's start position. When the raw
+            // hidden rect overhangs onto an adjacent display (stacked
+            // monitors), parking the window there would flash it on the
+            // neighbor screen and bounce it across a DPI boundary before
+            // the animation even starts -- park it at the path-bounded
+            // start instead (fully inside the owning monitor), which is
+            // what DoCustomAnimation animates from anyway.
+            RECT animStartRect = startRect;
+            RECT ownMonitorRect;
+            if (GetMonitorRectForRect(*rect, &ownMonitorRect) &&
+                RectOverhangsAdjacentMonitor(startRect, ownMonitorRect)) {
+                animStartRect =
+                    ShiftRectFullyInsideMonitor(startRect, ownMonitorRect);
+            }
+            SetWindowPos(hWnd, NULL, animStartRect.left, animStartRect.top,
+                         animStartRect.right - animStartRect.left,
+                         animStartRect.bottom - animStartRect.top,
                          SWP_NOZORDER | SWP_NOACTIVATE);
 
             // Restore window style before custom animation
@@ -606,7 +619,7 @@ void WINAPI TrayUI_SlideWindow_Hook(void* pThis,
             }
             DwmFlush();
 
-            DoCustomAnimation(hWnd, &startRect, rect, show, animGen);
+            DoCustomAnimation(hWnd, &animStartRect, rect, show, animGen);
         } else {
             DoCustomAnimation(hWnd, &startRect, rect, show, animGen);
 
