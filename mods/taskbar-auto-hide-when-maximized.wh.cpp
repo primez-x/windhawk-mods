@@ -2,7 +2,7 @@
 // @id              taskbar-auto-hide-when-maximized
 // @name            Taskbar auto-hide when maximized
 // @description     Makes the taskbar auto-hide only when a window is maximized or intersects the taskbar
-// @version         1.2.6
+// @version         1.2.7
 // @author          m417z
 // @github          https://github.com/m417z
 // @twitter         https://twitter.com/m417z
@@ -564,6 +564,58 @@ bool CanHideTaskbarForWindow(HWND hWnd,
     return false;
 }
 
+// True if any real, taskband-eligible window (visible, not cloaked, not a
+// system/overlay window) currently belongs to this monitor — minimized
+// windows count, since they still occupy a taskband button. Unlike
+// CanHideTaskbarForWindow, this doesn't care about maximized/intersecting
+// state, only existence: a monitor with nothing here has no app icons to
+// gate hiding on in the first place.
+bool MonitorHasAnyEligibleWindow(HMONITOR monitor) {
+    DWORD dwTaskbarThreadId = GetCurrentThreadId();
+    bool found = false;
+
+    auto enumWindowsProc = [&](HWND hWnd) -> BOOL {
+        if (GetWindowThreadProcessId(hWnd, nullptr) == dwTaskbarThreadId) {
+            return TRUE;
+        }
+
+        if (!IsWindowVisible(hWnd) || IsWindowCloaked(hWnd) ||
+            (GetWindowLong(hWnd, GWL_EXSTYLE) & WS_EX_NOACTIVATE)) {
+            return TRUE;
+        }
+
+        if (hWnd == g_altTabViewHwnd || hWnd == GetShellWindow() ||
+            GetProp(hWnd, L"DesktopWindow")) {
+            return TRUE;
+        }
+
+        // Exclude menus (#32768).
+        if (GetClassWord(hWnd, GCW_ATOM) == 32768) {
+            return TRUE;
+        }
+
+        if (IsWindowExcluded(hWnd)) {
+            return TRUE;
+        }
+
+        if (MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST) != monitor) {
+            return TRUE;
+        }
+
+        found = true;
+        return FALSE;
+    };
+
+    EnumWindows(
+        [](HWND hWnd, LPARAM lParam) -> BOOL {
+            auto& proc = *reinterpret_cast<decltype(enumWindowsProc)*>(lParam);
+            return proc(hWnd);
+        },
+        reinterpret_cast<LPARAM>(&enumWindowsProc));
+
+    return found;
+}
+
 bool ShouldKeepTaskbarShown(HWND hTaskbarWnd, HMONITOR monitor) {
     if (g_settings.primaryMonitorOnly &&
         monitor != MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY)) {
@@ -577,6 +629,15 @@ bool ShouldKeepTaskbarShown(HWND hTaskbarWnd, HMONITOR monitor) {
     // Always show taskbar when MultitaskingView (Win+Tab) is active.
     if (g_multitaskingViewHwnd) {
         return true;
+    }
+
+    // A monitor with no app windows at all (e.g. an idle secondary display)
+    // has no taskband icons to gate hiding on — allow hide regardless of
+    // foregroundWindowOnly, which otherwise only ever looks at the single
+    // global foreground window and can keep an empty monitor's taskbar
+    // shown indefinitely.
+    if (!MonitorHasAnyEligibleWindow(monitor)) {
+        return false;
     }
 
     MONITORINFO monitorInfo{
